@@ -17,8 +17,24 @@ app.use(
     target: 'https://api.openai.com',
     changeOrigin: true,
     pathRewrite: { '^/openai': '' },
+    on: {
+      proxyReq: (proxyReq, req, res) => {
+        // If server has an API key, use it. Otherwise, assume the client sent one in headers.
+        const serverKey = process.env.OPENAI_API_KEY;
+        if (serverKey) {
+          proxyReq.setHeader('Authorization', `Bearer ${serverKey}`);
+        }
+      },
+    },
   })
 );
+
+// Configuration endpoint for the frontend
+app.get('/api/config', (req, res) => {
+  res.json({
+    hasServerKey: !!process.env.OPENAI_API_KEY,
+  });
+});
 
 app.use(express.static(dist));
 

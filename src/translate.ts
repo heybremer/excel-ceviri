@@ -1,20 +1,17 @@
 import { labelForCode } from './languages';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Geliştirme: Vite proxy; üretim: aynı origin üzerinden Express proxy */
 function openAiUrl(): string {
   return '/openai/v1/chat/completions';
 }
 
-type ChatCompletionResponse = {
+type ChatResponse = {
   choices?: Array<{ message?: { content?: string | null } }>;
   error?: { message?: string };
 };
 
 /**
- * OpenAI Chat Completions ile çeviri (gpt-4o-mini vb.).
- * Boş metin aynen döner.
+ * OpenAI Chat Completions ile tek metin çevirisi.
+ * Boş metin aynen döner. Rate-limit ve paralel istek yönetimi çağıran tarafta yapılır.
  */
 export async function translateWithOpenAI(
   text: string,
@@ -22,70 +19,51 @@ export async function translateWithOpenAI(
   targetLang: string,
   apiKey: string,
   model: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<string> {
   const t = text.trim();
   if (!t) return text;
 
-  const key = apiKey.trim();
-  if (!key) {
-    throw new Error('OpenAI API anahtarı gerekli.');
-  }
+  const srcName = labelForCode(sourceLang);
+  const tgtName = labelForCode(targetLang);
 
-  const sourceName = labelForCode(sourceLang);
-  const targetName = labelForCode(targetLang);
-
-  const body = {
-    model,
-    temperature: 0.2,
-    messages: [
-      {
-        role: 'system' as const,
-        content:
-          'You are an expert translator. Output only the translated text. Do not add quotes, explanations, or markdown. Preserve line breaks within the text.',
-      },
-      {
-        role: 'user' as const,
-        content: `Translate the following text from ${sourceName} (${sourceLang}) to ${targetName} (${targetLang}).\n\n${t}`,
-      },
-    ],
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
   };
+  if (apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
 
   const res = await fetch(openAiUrl(), {
     method: 'POST',
     signal,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(body),
+    headers,
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a professional translator. Output ONLY the translated text — no quotes, no explanations, no markdown. Preserve the original formatting and line breaks.',
+        },
+        {
+          role: 'user',
+          content: `Translate from ${srcName} (${sourceLang}) to ${tgtName} (${targetLang}):\n\n${t}`,
+        },
+      ],
+    }),
   });
 
-  const data = (await res.json()) as ChatCompletionResponse;
+  const data = (await res.json()) as ChatResponse;
 
   if (!res.ok) {
-    const msg = data.error?.message ?? `OpenAI hatası: ${res.status}`;
-    throw new Error(msg);
+    throw new Error(data.error?.message ?? `OpenAI hatası: ${res.status}`);
   }
 
   const out = data.choices?.[0]?.message?.content;
-  if (typeof out !== 'string') {
-    throw new Error('Model yanıtı okunamadı.');
+  if (typeof out !== 'string' || !out.trim()) {
+    throw new Error('Model boş yanıt döndürdü.');
   }
   return out.trim();
-}
-
-/** Kısa gecikme — çok hızlı ardışık isteklerde sınır riskini azaltır */
-export const REQUEST_DELAY_MS = 120;
-
-export async function translateWithDelay(
-  text: string,
-  sourceLang: string,
-  targetLang: string,
-  apiKey: string,
-  model: string,
-  signal?: AbortSignal
-): Promise<string> {
-  await sleep(REQUEST_DELAY_MS);
-  return translateWithOpenAI(text, sourceLang, targetLang, apiKey, model, signal);
 }
