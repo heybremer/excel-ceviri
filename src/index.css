@@ -1,0 +1,41 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --surface2: #243044;
+  --border: #334155;
+  --text: #e8eef5;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-dim: #0ea5e9;
+  --danger: #f87171;
+  --radius: 12px;
+  font-family: 'DM Sans', system-ui, sans-serif;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
