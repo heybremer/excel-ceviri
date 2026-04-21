@@ -7,11 +7,12 @@ import './App.css';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type TargetRow = { id: string; columnLetter: string; langCode: string };
+type TranslationJob = { id: string; sourceColumn: string; sourceLang: string; targets: TargetRow[] };
 type CellStatus = 'pending' | 'translating' | 'done' | 'failed';
 type CellResult = { status: CellStatus; text?: string; error?: string };
-type CellInfo = { row: number; targetIdx: number; langCode: string; key: string };
+type CellInfo = { row: number; targetIdx: number; langCode: string; key: string; srcIdx: number; sourceLang: string };
 type TranslationConfig = {
-  srcIdx: number; sourceLang: string; apiKey: string; model: string; concurrency: number;
+  apiKey: string; model: string; concurrency: number;
 };
 interface SavedSession {
   version: number;
@@ -33,8 +34,12 @@ function padRow(row: string[], len: number): string[] {
 function maxCols(data: string[][]): number {
   return data.reduce((m, r) => Math.max(m, r.length), 0);
 }
-function configHash(src: string, sl: string, tgts: TargetRow[]): string {
-  return JSON.stringify({ src, sl, tgts: tgts.map(t => `${t.columnLetter}:${t.langCode}`).sort() });
+function configHash(jobs: TranslationJob[]): string {
+  return JSON.stringify(jobs.map(j => ({
+    s: j.sourceColumn,
+    sl: j.sourceLang,
+    t: j.targets.map(t => `${t.columnLetter}:${t.langCode}`).sort()
+  })));
 }
 
 // ─── Session ─────────────────────────────────────────────────────────────────
@@ -61,18 +66,23 @@ export default function App() {
   const [data, setData] = useState<string[][]>([]);
   const [skipHeader, setSkipHeader] = useState(true);
 
-  // Config
-  const [sourceColumn, setSourceColumn] = useState('A');
-  const [sourceLang, setSourceLang] = useState('tr');
-  const [targets, setTargets] = useState<TargetRow[]>([
-    { id: uid(), columnLetter: 'B', langCode: 'de' },
-    { id: uid(), columnLetter: 'C', langCode: 'it' },
-    { id: uid(), columnLetter: 'D', langCode: 'es' },
-    { id: uid(), columnLetter: 'E', langCode: 'en' },
+  // Jobs
+  const [jobs, setJobs] = useState<TranslationJob[]>([
+    {
+      id: uid(),
+      sourceColumn: 'A',
+      sourceLang: 'tr',
+      targets: [
+        { id: uid(), columnLetter: 'B', langCode: 'de' },
+        { id: uid(), columnLetter: 'C', langCode: 'en' },
+      ]
+    }
   ]);
+
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
   const [concurrency, setConcurrency] = useState(3);
+  const [excludedWords, setExcludedWords] = useState('');
 
   // Translation state
   const [busy, setBusy] = useState(false);
@@ -91,7 +101,6 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   const lastSaveRef = useRef(0);
 
-  const srcIdx = useMemo(() => columnLetterToIndex(sourceColumn), [sourceColumn]);
   const colList = useMemo(() => columnOptions(maxCols(data) - 1), [data]);
 
   // Ticker for live ETA
@@ -153,21 +162,46 @@ export default function App() {
     const f = e.target.files?.[0]; if (f) loadFile(f); e.target.value = '';
   };
 
-  // Target management
-  const addTarget = () => {
-    const used = new Set(targets.map(t => t.columnLetter));
-    setTargets(t => [...t, { id: uid(), columnLetter: colList.find(c => !used.has(c)) ?? 'Z', langCode: 'fr' }]);
+  // Job management
+  const addJob = () => {
+    setJobs(prev => [...prev, {
+      id: uid(),
+      sourceColumn: colList[0] || 'A',
+      sourceLang: 'tr',
+      targets: [{ id: uid(), columnLetter: colList[1] || 'B', langCode: 'en' }]
+    }]);
   };
-  const removeTarget = (id: string) => setTargets(t => t.filter(x => x.id !== id));
-  const patchTarget = (id: string, p: Partial<TargetRow>) => setTargets(t => t.map(x => x.id === id ? { ...x, ...p } : x));
+  const removeJob = (id: string) => setJobs(prev => prev.filter(j => j.id !== id));
+  const patchJob = (id: string, p: Partial<TranslationJob>) => setJobs(prev => prev.map(j => j.id === id ? { ...j, ...p } : j));
+
+  const addTarget = (jobId: string) => {
+    setJobs(prev => prev.map(j => {
+      if (j.id !== jobId) return j;
+      const used = new Set(j.targets.map(t => t.columnLetter));
+      return {
+        ...j,
+        targets: [...j.targets, { id: uid(), columnLetter: colList.find(c => c !== j.sourceColumn && !used.has(c)) ?? 'Z', langCode: 'fr' }]
+      };
+    }));
+  };
+  const removeTarget = (jobId: string, targetId: string) => {
+    setJobs(prev => prev.map(j => j.id === jobId ? { ...j, targets: j.targets.filter(t => t.id !== targetId) } : j));
+  };
+  const patchTarget = (jobId: string, targetId: string, p: Partial<TargetRow>) => {
+    setJobs(prev => prev.map(j => j.id === jobId ? { ...j, targets: j.targets.map(t => t.id === targetId ? { ...t, ...p } : t) } : j));
+  };
 
   // Validation
   const validate = (): string | null => {
     if (!data.length) return 'Önce bir Excel dosyası yükleyin.';
     if (!apiKey.trim() && !hasServerKey) return 'OpenAI API anahtarını girin.';
-    const idxs = targets.map(t => columnLetterToIndex(t.columnLetter));
-    if (new Set(idxs).size !== idxs.length) return 'Aynı hedef sütunu iki kez seçemezsiniz.';
-    if (idxs.includes(srcIdx)) return 'Hedef sütun, kaynak sütunla aynı olamaz.';
+    
+    for (const job of jobs) {
+      const srcIdx = columnLetterToIndex(job.sourceColumn);
+      const targetIdxs = job.targets.map(t => columnLetterToIndex(t.columnLetter));
+      if (new Set(targetIdxs).size !== targetIdxs.length) return `İş (Sütun ${job.sourceColumn}): Aynı hedef sütunu iki kez seçemezsiniz.`;
+      if (targetIdxs.includes(srcIdx)) return `İş (Sütun ${job.sourceColumn}): Hedef sütun, kaynak sütunla aynı olamaz.`;
+    }
     return null;
   };
 
@@ -179,6 +213,8 @@ export default function App() {
     const queue = [...cells];
     let doneCount = prevDone;
 
+    const exclusionList = excludedWords.split('\n').map(w => w.trim()).filter(Boolean);
+
     const worker = async () => {
       while (queue.length > 0) {
         if (signal.aborted) return;
@@ -188,14 +224,14 @@ export default function App() {
         const cell = queue.shift();
         if (!cell) return;
 
-        const text = String(gridRef.current[cell.row]?.[cfg.srcIdx] ?? '').trim();
+        const text = String(gridRef.current[cell.row]?.[cell.srcIdx] ?? '').trim();
         if (!text) { doneCount++; setStats(s => ({ ...s, done: doneCount })); continue; }
 
         resultsRef.current.set(cell.key, { status: 'translating' });
         bump();
 
         try {
-          const out = await translateWithOpenAI(text, cfg.sourceLang, cell.langCode, cfg.apiKey, cfg.model, signal);
+          const out = await translateWithOpenAI(text, cell.sourceLang, cell.langCode, cfg.apiKey, cfg.model, signal, exclusionList);
           if (signal.aborted) return;
           gridRef.current[cell.row][cell.targetIdx] = out;
           resultsRef.current.set(cell.key, { status: 'done', text: out });
@@ -208,7 +244,7 @@ export default function App() {
             lastSaveRef.current = now;
             const cr: Record<string, string> = {};
             resultsRef.current.forEach((v, k) => { if (v.status === 'done' && v.text) cr[k] = v.text; });
-            sessionSave({ version: 1, fileName: fileName!, configHash: configHash(sourceColumn, cfg.sourceLang, targets), completedResults: cr, timestamp: Date.now() });
+            sessionSave({ version: 1, fileName: fileName!, configHash: configHash(jobs), completedResults: cr, timestamp: Date.now() });
           }
         } catch (err) {
           if (signal.aborted) return;
@@ -228,13 +264,18 @@ export default function App() {
     const err = validate();
     if (err) { setError(err); return; }
 
-    const tgts = targets.map(t => ({ ...t, idx: columnLetterToIndex(t.columnLetter) }));
     const rowStart = skipHeader ? 1 : 0;
-    const minCols = Math.max(srcIdx + 1, ...tgts.map(t => t.idx + 1));
-    const hash = configHash(sourceColumn, sourceLang, targets);
+    const hash = configHash(jobs);
+
+    // Calculate max cols needed across all jobs
+    let maxIdx = 0;
+    jobs.forEach(j => {
+      maxIdx = Math.max(maxIdx, columnLetterToIndex(j.sourceColumn));
+      j.targets.forEach(t => maxIdx = Math.max(maxIdx, columnLetterToIndex(t.columnLetter)));
+    });
 
     // Build grid
-    const grid = data.map(r => padRow(r.map(c => String(c ?? '')), minCols));
+    const grid = data.map(r => padRow(r.map(c => String(c ?? '')), maxIdx + 1));
     gridRef.current = grid;
 
     // Apply resumed results
@@ -254,18 +295,23 @@ export default function App() {
     // Build cell queue (skip already done)
     const cells: CellInfo[] = [];
     for (let r = rowStart; r < data.length; r++) {
-      if (!String(data[r]?.[srcIdx] ?? '').trim()) continue;
-      for (const t of tgts) {
-        const key = `${r}:${t.idx}`;
-        if (prevDone[key]) continue;
-        cells.push({ row: r, targetIdx: t.idx, langCode: t.langCode, key });
-        resultsRef.current.set(key, { status: 'pending' });
+      for (const job of jobs) {
+        const srcIdx = columnLetterToIndex(job.sourceColumn);
+        if (!String(data[r]?.[srcIdx] ?? '').trim()) continue;
+        
+        for (const t of job.targets) {
+          const tIdx = columnLetterToIndex(t.columnLetter);
+          const key = `${r}:${tIdx}`;
+          if (prevDone[key]) continue;
+          cells.push({ row: r, targetIdx: tIdx, langCode: t.langCode, key, srcIdx, sourceLang: job.sourceLang });
+          resultsRef.current.set(key, { status: 'pending' });
+        }
       }
     }
 
     const alreadyDone = Object.keys(prevDone).length;
     const total = alreadyDone + cells.length;
-    if (total === 0) { setError('Kaynak sütunda çevrilecek dolu hücre yok.'); return; }
+    if (total === 0) { setError('Çevrilecek dolu hücre bulunamadı.'); return; }
 
     setStats({ done: alreadyDone, failed: 0, total, startMs: Date.now() });
     setError(null); setFinalGrid(null); setBusy(true); setPaused(false);
@@ -273,7 +319,7 @@ export default function App() {
 
     const ac = new AbortController();
     abortRef.current = ac;
-    const cfg: TranslationConfig = { srcIdx, sourceLang, apiKey: apiKey.trim(), model, concurrency };
+    const cfg: TranslationConfig = { apiKey: apiKey.trim(), model, concurrency };
 
     try {
       await runWorkers(cells, cfg, ac.signal, alreadyDone, total);
@@ -294,8 +340,23 @@ export default function App() {
       if (v.status !== 'failed') return;
       const [rs, cs] = k.split(':');
       const r = Number(rs), c = Number(cs);
-      const t = targets.find(x => columnLetterToIndex(x.columnLetter) === c);
-      if (t) { failed.push({ row: r, targetIdx: c, langCode: t.langCode, key: k }); resultsRef.current.set(k, { status: 'pending' }); }
+      
+      // Find which job this failed cell belongs to
+      for (const job of jobs) {
+        const t = job.targets.find(x => columnLetterToIndex(x.columnLetter) === c);
+        if (t) {
+          failed.push({ 
+            row: r, 
+            targetIdx: c, 
+            langCode: t.langCode, 
+            key: k, 
+            srcIdx: columnLetterToIndex(job.sourceColumn), 
+            sourceLang: job.sourceLang 
+          });
+          resultsRef.current.set(k, { status: 'pending' });
+          break;
+        }
+      }
     });
     if (!failed.length) return;
 
@@ -349,16 +410,20 @@ export default function App() {
     const start = skipHeader ? 1 : 0;
     return data.slice(start, start + 8).map((row, ri) => {
       const rowIdx = start + ri;
-      return {
-        rowIdx,
-        src: String(row[srcIdx] ?? ''),
-        cols: targets.map(t => {
+      const allCols: { letter: string; langCode: string; result: CellResult | undefined; isSource?: boolean }[] = [];
+      
+      jobs.forEach(job => {
+        const sIdx = columnLetterToIndex(job.sourceColumn);
+        allCols.push({ letter: job.sourceColumn, langCode: job.sourceLang, result: { status: 'done', text: String(row[sIdx] ?? '') }, isSource: true });
+        job.targets.forEach(t => {
           const key = `${rowIdx}:${columnLetterToIndex(t.columnLetter)}`;
-          return { letter: t.columnLetter, langCode: t.langCode, result: resultsRef.current.get(key) };
-        }),
-      };
+          allCols.push({ letter: t.columnLetter, langCode: t.langCode, result: resultsRef.current.get(key) });
+        });
+      });
+
+      return { rowIdx, cols: allCols };
     });
-  }, [data, targets, srcIdx, skipHeader, tick]);
+  }, [data, jobs, skipHeader, tick]);
 
   const hasResults = resultsRef.current.size > 0;
   const isComplete = !busy && stats.total > 0 && stats.done >= stats.total - failedCount;
@@ -466,50 +531,77 @@ export default function App() {
               ? "Sistem anahtarı tanımlı. İsterseniz kendi anahtarınızı girerek onu kullanabilirsiniz."
               : "Anahtar yalnızca tarayıcınızda (sessionStorage) tutulur, hiçbir sunucuya gönderilmez."}
           </p>
-        </section>
-
-        {/* ── 3. Kaynak ── */}
-        <section className="card">
-          <h2 className="card-hd"><span className="badge">3</span>Kaynak</h2>
-          <div className="row gap">
-            <div className="field w160">
-              <label>Çevrilecek sütun</label>
-              <select className="select" value={sourceColumn} onChange={e => setSourceColumn(e.target.value)} disabled={busy || !data.length}>
-                {colList.map(c => <option key={c} value={c}>Sütun {c}</option>)}
-              </select>
-            </div>
-            <div className="field w220">
-              <label>Kaynak dil</label>
-              <select className="select" value={sourceLang} onChange={e => setSourceLang(e.target.value)} disabled={busy}>
-                {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-              </select>
-            </div>
+          
+          <div className="field mt-1">
+            <label>Hariç Tutulacak Kelimeler / Kalıplar (Her satıra bir tane)</label>
+            <textarea 
+              className="input textarea" 
+              placeholder="Örn: Bremer Sitzbezüge" 
+              value={excludedWords} 
+              onChange={e => setExcludedWords(e.target.value)}
+              rows={3}
+              disabled={busy}
+            />
+            <p className="note">Bu kelimeler çevrilmeden olduğu gibi bırakılır.</p>
           </div>
         </section>
 
-        {/* ── 4. Hedefler ── */}
+        {/* ── 3. Çeviri Görevleri ── */}
         <section className="card">
           <h2 className="card-hd">
-            <span className="badge">4</span>Hedef Sütunlar
-            <button className="btn btn-ghost btn-sm ml-auto" onClick={addTarget} disabled={busy}>+ Ekle</button>
+            <span className="badge">3</span>Çeviri Görevleri
+            <button className="btn btn-ghost btn-sm ml-auto" onClick={addJob} disabled={busy}>+ Yeni Kaynak Sütun Ekle</button>
           </h2>
-          <div className="targets">
-            {targets.map(t => (
-              <div className="tgt-row" key={t.id}>
-                <div className="tgt-col-badge">{t.columnLetter}</div>
-                <div className="field w100">
-                  <label>Sütun</label>
-                  <select className="select" value={t.columnLetter} onChange={e => patchTarget(t.id, { columnLetter: e.target.value })} disabled={busy || !data.length}>
-                    {colList.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
+          
+          <div className="jobs-list">
+            {jobs.map((job, ji) => (
+              <div className="job-card" key={job.id}>
+                <div className="job-header">
+                  <div className="job-title">Görev #{ji + 1}</div>
+                  <button className="btn btn-icon btn-sm" onClick={() => removeJob(job.id)} disabled={busy || jobs.length <= 1}>✕</button>
                 </div>
-                <div className="field grow">
-                  <label>Hedef dil</label>
-                  <select className="select" value={t.langCode} onChange={e => patchTarget(t.id, { langCode: e.target.value })} disabled={busy}>
-                    {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                  </select>
+                
+                <div className="row gap">
+                  <div className="field w160">
+                    <label>Kaynak Sütun</label>
+                    <select className="select" value={job.sourceColumn} onChange={e => patchJob(job.id, { sourceColumn: e.target.value })} disabled={busy || !data.length}>
+                      {colList.map(c => <option key={c} value={c}>Sütun {c}</option>)}
+                    </select>
+                  </div>
+                  <div className="field grow">
+                    <label>Kaynak Dil</label>
+                    <select className="select" value={job.sourceLang} onChange={e => patchJob(job.id, { sourceLang: e.target.value })} disabled={busy}>
+                      {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                    </select>
+                  </div>
                 </div>
-                <button className="btn btn-icon" onClick={() => removeTarget(t.id)} disabled={busy || targets.length <= 1} title="Kaldır">✕</button>
+
+                <div className="targets-box mt-1">
+                  <div className="targets-hd">
+                    <span>Hedef Diller</span>
+                    <button className="btn btn-ghost btn-sm" onClick={() => addTarget(job.id)} disabled={busy}>+ Dil Ekle</button>
+                  </div>
+                  <div className="targets">
+                    {job.targets.map(t => (
+                      <div className="tgt-row" key={t.id}>
+                        <div className="tgt-col-badge">{t.columnLetter}</div>
+                        <div className="field w100">
+                          <label>Sütun</label>
+                          <select className="select" value={t.columnLetter} onChange={e => patchTarget(job.id, t.id, { columnLetter: e.target.value })} disabled={busy || !data.length}>
+                            {colList.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+                        <div className="field grow">
+                          <label>Hedef dil</label>
+                          <select className="select" value={t.langCode} onChange={e => patchTarget(job.id, t.id, { langCode: e.target.value })} disabled={busy}>
+                            {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                          </select>
+                        </div>
+                        <button className="btn btn-icon" onClick={() => removeTarget(job.id, t.id)} disabled={busy || job.targets.length <= 1}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -517,7 +609,7 @@ export default function App() {
 
         {/* ── 5. Çevir ── */}
         <section className="card">
-          <h2 className="card-hd"><span className="badge">5</span>Çevir ve İndir</h2>
+          <h2 className="card-hd"><span className="badge">4</span>Çevir ve İndir</h2>
 
           {/* Resume banner */}
           {resumable && !busy && (
@@ -597,25 +689,23 @@ export default function App() {
               <table className="tbl preview-tbl">
                 <thead>
                   <tr>
-                    <th className="src-th">
-                      {sourceColumn} · {LANGUAGES.find(l => l.code === sourceLang)?.label}
-                    </th>
-                    {targets.map(t => (
-                      <th key={t.id}>{t.columnLetter} · {LANGUAGES.find(l => l.code === t.langCode)?.label}</th>
+                    <th className="src-th">Hücre</th>
+                    {jobs.map(j => (
+                      <th key={j.id} className="src-th">{j.sourceColumn} → {j.targets.map(t => t.columnLetter).join(', ')}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {previewData.map(({ rowIdx, src, cols }) => (
+                  {previewData.map(({ rowIdx, cols }) => (
                     <tr key={rowIdx}>
-                      <td className="src-cell">{src || <span className="muted">—</span>}</td>
-                      {cols.map(({ letter, result }) => {
-                        const s = result?.status;
+                      <td className="muted">{rowIdx + 1}</td>
+                      {cols.map((col, ci) => {
+                        const s = col.result?.status;
                         return (
-                          <td key={letter} className={`c-${s ?? 'idle'}`} title={result?.error}>
+                          <td key={ci} className={`c-${s ?? 'idle'} ${col.isSource ? 'src-cell' : ''}`} title={col.result?.error}>
                             {s === 'translating' && <span className="spinner">⟳ </span>}
-                            {s === 'done' && result?.text}
-                            {s === 'failed' && <span className="err-txt" title={result?.error}>✕ Hata</span>}
+                            {s === 'done' && col.result?.text}
+                            {s === 'failed' && <span className="err-txt" title={col.result?.error}>✕ Hata</span>}
                             {(!s || s === 'pending') && <span className="idle-dot">·</span>}
                           </td>
                         );

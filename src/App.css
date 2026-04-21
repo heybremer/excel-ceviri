@@ -454,6 +454,46 @@ h1, h2, h3, .hdr-title {
   box-shadow: 0 0 15px var(--accent-glow);
 }
 
+/* ─── Jobs & Tasks ────────────────────────────────────────────────────────── */
+.jobs-list { display: flex; flex-direction: column; gap: 1.5rem; }
+.job-card {
+  padding: 1.25rem;
+  border-radius: var(--radius);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  transition: all 0.2s ease;
+}
+.job-card:hover { border-color: var(--border2); background: var(--surface3); }
+
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.job-title { font-weight: 700; color: var(--accent); font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.targets-box {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+  border: 1px solid var(--border);
+}
+.targets-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.mt-1 { margin-top: 1rem; }
+.textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
+
 /* ─── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {
   .hdr-title { font-size: 2.2rem; }
@@ -462,6 +502,7 @@ h1, h2, h3, .hdr-title {
   .btn-lg { width: 100%; }
   .row { flex-direction: column; }
   .w100, .w140, .w160, .w220, .grow { width: 100%; }
+  .job-card { padding: 1rem; }
   .tgt-row { flex-direction: column; align-items: stretch; }
   .tgt-col-badge { display: none; }
 }

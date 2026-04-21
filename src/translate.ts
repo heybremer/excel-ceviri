@@ -20,6 +20,7 @@ export async function translateWithOpenAI(
   apiKey: string,
   model: string,
   signal?: AbortSignal,
+  exclusionList?: string[],
 ): Promise<string> {
   const t = text.trim();
   if (!t) return text;
@@ -34,6 +35,10 @@ export async function translateWithOpenAI(
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
+  const exclusionPrompt = exclusionList && exclusionList.length > 0
+    ? `\n\nCRITICAL: Do NOT translate the following terms, keep them exactly as they are: ${exclusionList.join(', ')}.`
+    : '';
+
   const res = await fetch(openAiUrl(), {
     method: 'POST',
     signal,
@@ -45,7 +50,7 @@ export async function translateWithOpenAI(
         {
           role: 'system',
           content:
-            'You are a professional translator. Output ONLY the translated text — no quotes, no explanations, no markdown. Preserve the original formatting and line breaks.',
+            `You are a professional translator. Output ONLY the translated text — no quotes, no explanations, no markdown. Preserve the original formatting and line breaks.${exclusionPrompt}`,
         },
         {
           role: 'user',
